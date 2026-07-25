@@ -141,6 +141,13 @@ Output: 0.0
 - 调包示例：[lib_Reduction.cu](/home/xj/advanced_cuda/code/lib_Reduction.cu)，用于学习 CUB `DeviceReduce::Sum` API。
 - 性能报告：[Nsight Compute](/home/xj/advanced_cuda/reports/leetgpu_reduction_compare_ncu_detailed.ncu-rep)、[Nsight Systems](/home/xj/advanced_cuda/reports/leetgpu_reduction_compare_nsys.nsys-rep)。
 
+#### 完成标志（2026-07-25）
+
+- **实现状态：已实现；第一层验收部分完成，第二层实现说明完成。** 本轮在 RTX 5070 Ti 上以 `N=4,194,304`、`5` 次 warmup 和 `20` 次正式计时运行。CPU 参考值、手写 GPU 和 CUB GPU 的和均为 `4,194,304`，两种 GPU 结果误差均为 `0`；手写版 `21.211 us`（`790.96 GB/s`），CUB `20.109 us`（`834.32 GB/s`），手写版为 CUB 时间的 `1.055x`。
+- **第一层问题：正确性与边界是否覆盖？** 当前入口验证了题目性能规模，并与 CPU 累加和及 CUB 对照；实现的首阶段会以掩码处理最后一个不满 `float4` 的读取。尚未把 `N=1`、非 2 的幂、随机/负数输入写入自动化测试，因此不将第一层标为完全验收。
+- **第二层问题：线程、访存和同步如何设计？** 每个 thread 读取 4 个连续 `float`，`float4` 主路径使 warp 的全局读取连续合并；一个 block 先在寄存器中累计，再用 warp shuffle 完成 warp 内归约，只将各 warp 的部分和写入 shared memory，最后由第一个 warp 汇总。第一阶段输出 block partial sum，第二阶段由单 block 写出总和；block 数按 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 和 SM 数量估算，以兼顾并行度与 partial 数量。shared memory 仅按 warp 编号线性访问，使用量很小，也不存在同一 warp 的 bank conflict 模式。
+- **第三层问题：是否有 profiling 依据？** 已保存 Nsight Systems/Compute 报告，并有 CUB 对照；该题的第三层不是题单强制项。后续要完成第一层，应扩展测试入口并固定记录不同输入形状下的正确性。
+
 单文件测试编译：
 
 ```bash
@@ -178,6 +185,13 @@ Output: [5.0, 3.0, 6.0, 7.0, 3.0]
 参考实现：[PrefixSum.cu](/home/xj/advanced_cuda/code/PrefixSum.cu)。该版本不直接调用 Thrust/CUB 的 device-level scan，而是用 CUB block-level primitive 做块内扫描，再递归扫描 block sums 并加回跨 block offset。
 
 调包示例：[lib_PrefixSum.cu](/home/xj/advanced_cuda/code/lib_PrefixSum.cu)，用于学习 Thrust `thrust::inclusive_scan` 和 CUB `DeviceScan::InclusiveSum` API。
+
+#### 完成标志（2026-07-25）
+
+- **实现状态：已实现；第一层验收部分完成，第二层实现说明完成。** 在 RTX 5070 Ti 上，`N=250,000`、`5` 次 warmup 和 `20` 次正式计时得到末元素 `250000`、最大误差 `0`、平均 `503.042 us`（`3.98 GB/s`）。块边界验证 `N=1`、`2047`、`2048`、`2049` 的末元素均等于期望值，最大误差均为 `0`。
+- **第一层问题：正确性与边界是否覆盖？** 测试覆盖了单元素、一个 block 内的尾部、恰好一个 block、跨 block 的首个元素；测试输入为全 `1`，CPU 参考值为 `i + 1`。仍缺少随机、负数和大规模自动化对照，因此第一层保留为部分验收。
+- **第二层问题：线程、访存和同步如何设计？** 一个 block 为 `256` threads，每 thread 处理 `8` 个元素，即每 block `2048` 个元素。`cub::BlockLoad/BlockStore` 的 warp-transpose 布局用于块内合并读写；thread 先在寄存器内扫描其 8 项，再以 warp shuffle 扫描 thread sum。每个 warp 只写一个 shared-memory partial sum，第一个 warp 扫描这些 partial sum 后广播 offset。递归扫描 block sums，再由 `add_block_offsets_kernel` 加回前一 block 的总和，解决跨 block 依赖。主要瓶颈应为多轮 kernel launch 与递归临时分配，而非单个块内扫描的计算量。
+- **第三层问题：是否有 profiling 依据？** 此题第三层不是强制项，当前未保存 Nsight 报告。另一个待优化点是递归调用在 benchmark 内部执行 `cudaMalloc/cudaFree`；应改为预分配分层 workspace 后再比较 kernel 性能。
 
 单文件测试编译：
 
@@ -219,6 +233,13 @@ Output: [2.047e-09, 3.038e-07, 4.509e-05, 6.693e-03, 9.933e-01] 近似
 - 对主路径使用 `float4` 合并读写，workspace 预分配后复用，避免 benchmark 中反复 `cudaMalloc` / `cudaFree`。
 
 调包示例：[lib_Softmax.cu](/home/xj/advanced_cuda/code/lib_Softmax.cu)，用于学习 Thrust `max_element` / `transform` / `reduce` 和 CUB `DeviceReduce::Max` / `DeviceReduce::Sum` API。
+
+#### 完成标志（2026-07-25）
+
+- **实现状态：第一层和第二层已验收，已补充第三层 profiling 记录。** 在 RTX 5070 Ti 上，`N=500,000`、`5` 次 warmup 和 `20` 次正式计时得到 `output_sum=0.999999919`、最大绝对误差 `3.637979e-12`、最大相对误差 `4.254749e-07`，平均 `66.362 us`（`150.69 GB/s`）；`N=1` 时输出和为 `1`、绝对/相对误差均为 `0`。
+- **第一层问题：正确性与边界是否覆盖？** CPU 参考实现和 GPU 均采用 max trick，CPU 使用 double 累加；实测覆盖单元素和题目性能规模 `500,000`，后者也是非 2 的幂。输出和接近 1 且逐元素误差很小，满足数值稳定性与正确性检查；benchmark 将 warmup 与正式计时分开，workspace 在计时前分配。
+- **第二层问题：线程、访存和同步如何设计？** 主路径使用 `256` threads/block 和 `float4` 连续合并读取。`max_first_pass_kernel` 与 `exp_sum_kernel` 先在寄存器累积，每个 warp 用 shuffle 归约、各 warp 的结果写 shared memory，再由一个 warp 汇总；它们分别产生全局 max 和指数和的 partial 值。`max_final_pass_kernel`、`sum_final_pass_kernel` 各以单 block 合并 partial 值，`normalize_kernel` 写回归一化结果。主路径访存连续，shared memory 只保存 warp partial；主要瓶颈是全局 max、全局 sum、归一化之间的 5 次 kernel launch 和两个单 block final reduction，而不是分支发散。
+- **第三层问题：profiling 和 baseline 说明了什么？** [Nsight Systems/Compute 分析](/home/xj/advanced_cuda/reports/softmax_500k_profile_analysis.md) 已记录。`N=500,000` 时，NCU 显示 5 个 kernel 合计约 `23.62 us`；两个单 block final reduction 各约 `2.30-2.40 us`，occupancy 仅约 `15%-17%`，是明显的固定开销。与 [CUB baseline](/home/xj/advanced_cuda/reports/lib_softmax_500k_baseline_analysis.md) 对比的代表结果为手写 `52.877 us`、CUB `56.673 us`；两者接近，说明当前应优先减少多阶段同步/launch 开销，而非仅微调 block 内 reduction。
 
 单文件测试编译：
 
