@@ -241,10 +241,8 @@ Output: [2.047e-09, 3.038e-07, 4.509e-05, 6.693e-03, 9.933e-01] 近似
 - **第二层问题：线程、访存和同步如何设计？** 主路径使用 `256` threads/block 和 `float4` 连续合并读取。`max_first_pass_kernel` 与 `exp_sum_kernel` 先在寄存器累积，每个 warp 用 shuffle 归约、各 warp 的结果写 shared memory，再由一个 warp 汇总；它们分别产生全局 max 和指数和的 partial 值。`max_final_pass_kernel`、`sum_final_pass_kernel` 各以单 block 合并 partial 值，`normalize_kernel` 写回归一化结果。主路径访存连续，shared memory 只保存 warp partial；主要瓶颈是全局 max、全局 sum、归一化之间的 5 次 kernel launch 和两个单 block final reduction，而不是分支发散。
 - **第三层问题：profiling 和 baseline 说明了什么？** [Nsight Systems/Compute 分析](/home/xj/advanced_cuda/reports/softmax_500k_profile_analysis.md) 已记录。`N=500,000` 时，NCU 显示 5 个 kernel 合计约 `23.62 us`；两个单 block final reduction 各约 `2.30-2.40 us`，occupancy 仅约 `15%-17%`，是明显的固定开销。与 [CUB baseline](/home/xj/advanced_cuda/reports/lib_softmax_500k_baseline_analysis.md) 对比的代表结果为手写 `52.877 us`、CUB `56.673 us`；两者接近，说明当前应优先减少多阶段同步/launch 开销，而非仅微调 block 内 reduction。
 
-#### 优化计划：减少多阶段同步与 launch 开销
-
-- **首选方案：改为 row-wise fused softmax。** 面向实际模型的二维输入，让一个 block 负责一行，在 block 内以 warp shuffle 和 shared memory 完成 `max -> exp/sum -> normalize`。这样每行只需 1 个 kernel，而不是当前一维全局实现的 5 个 kernel；可消除写出 global partial 值、两次单 block final reduction，以及它们之间的全局同步。
-- **超长单行：保留分段归约，但减少中间阶段。** 当一行无法由一个 block 处理时，合并 `exp` 计算与 partial sum，复用指数结果，避免额外的全局读写。只有在 profiling 证明 launch 固定开销仍占主导时，再评估 CUDA Graph；若 cooperative launch 的占用限制满足，也可用 grid-level synchronization 减少 launch 次数。
+**首选方案：改为 row-wise fused softmax。** 面向实际模型的二维输入，让一个 block 负责一行，在 block 内以 warp shuffle 和 shared memory 完成 `max -> exp/sum -> normalize`。这样每行只需 1 个 kernel，而不是当前一维全局实现的 5 个 kernel；可消除写出 global partial 值、两次单 block final reduction，以及它们之间的全局同步。
+**超长单行：保留分段归约，但减少中间阶段。** 当一行无法由一个 block 处理时，合并 `exp` 计算与 partial sum，复用指数结果，避免额外的全局读写。只有在 profiling 证明 launch 固定开销仍占主导时，再评估
 
 
 单文件测试编译：
