@@ -294,6 +294,26 @@ Output C = [[22, 28],
 
 约束/性能点：`16 <= M,N,K <= 4096`，性能测试 `M=N=K=1024`。
 
+参考实现：[GEMM.cu](/home/xj/advanced_cuda/code/GEMM.cu) 和 [lib_GEMM.cu](/home/xj/advanced_cuda/code/lib_GEMM.cu)。前者使用 WMMA 实现 FP16 输入、FP32 累加的 Tensor Core GEMM；后者使用 cuBLAS `cublasGemmEx`，通过 `C^T = B^T x A^T` 直接处理 row-major 数据，作为库 baseline。
+
+单文件测试编译：
+
+```bash
+nvcc -O3 -arch=sm_120 -lineinfo code/GEMM.cu -o bin/GEMM
+nvcc -O3 -arch=sm_120 -lineinfo code/lib_GEMM.cu -o bin/lib_GEMM -lcublas
+```
+
+性能测试命令：
+
+```bash
+./bin/GEMM 1024 1024 1024 100 20
+./bin/lib_GEMM 1024 1024 1024 100 20
+```
+
+- **测试结果（2026-07-25）：第一层和第二层已验收。** 在 RTX 5070 Ti（SM 12.0，CUDA Toolkit 13.0）上，以 `M=N=K=1024`、`20` 次 warmup、`100` 次正式迭代测得：手写 WMMA GEMM 平均 `112.603 us`、`19.07 TFLOPS`；cuBLAS GEMM 平均 `95.950 us`、`22.38 TFLOPS`。手写核达到 cuBLAS 吞吐的约 `85.2%`，耗时高约 `17.4%`。两者均采样校验 `512` 个输出元素，最大绝对误差 `1.531219e-02`、最大相对误差 `4.522427e-04`。
+- **实现检查：** 手写核以 `128 x 64 x 32` shared-memory tile 组织，8 个 warp 各计算四个 `16 x 16` WMMA accumulator fragment；A 以 row-major 读取，B 在 cooperative load 时转存为 column-major shared tile，减少 Tensor Core 读取时的布局转换。epilogue 融合 `alpha=1.0`、`beta=0.25` 和 FP16 写回。两个程序都在计时后从原始 `C_initial` 重新运行一次并与 CPU FP32 参考做采样校验。
+- **Profiling 状态：** 按当前要求，未运行 `nsys` 或 `ncu`。
+
 ### 10. 2D Convolution
 
 CUDA 训练重点：stencil 访问、halo 区域、shared memory tile、边界处理、访存复用。
